@@ -115,6 +115,7 @@ body{
 .ice.cracked svg{opacity:1}
 .eq{position:absolute;z-index:5;pointer-events:none;white-space:nowrap;font-family:var(--num);font-weight:600;color:var(--ink);
   background:#FBF5EA;border-radius:999px;box-shadow:0 6px 16px rgba(80,55,20,.18),0 0 0 1px rgba(120,90,50,.12)}
+.eq.why{white-space:normal;text-align:center;line-height:1.25;font-weight:500;border-radius:16px;background:#FFF9EF;z-index:6}
 .cheer{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:16px;pointer-events:none}
 .cheer i{border-radius:50%;display:block;animation:hop .7s cubic-bezier(.3,.7,.4,1) 2 alternate both;
   background:radial-gradient(circle at 36% 30%,var(--l) 0%,var(--f) 45%,var(--d) 100%);box-shadow:0 6px 8px rgba(60,40,15,.25)}
@@ -190,6 +191,10 @@ body{
     <div class="field inline">
       <span class="lab">Sound</span>
       <button class="switch" id="sndSw" role="switch" aria-checked="true" aria-label="Sound"><span></span></button>
+    </div>
+    <div class="field inline">
+      <span class="lab">Helper bubbles</span>
+      <button class="switch" id="helpSw" role="switch" aria-checked="true" aria-label="Helper bubbles"><span></span></button>
     </div>
     <div class="row">
       <button id="keep">Cancel</button>
@@ -491,6 +496,25 @@ function solvable(vals,G,maxV,minV){
   };
   return rec(vals.slice().sort((a,b)=>a-b));
 }
+/* same search as solvable, but returns the moves so a refusal can say which sum this block is saved for */
+function planMoves(items,G,maxV,minV){
+  const dead=new Set();let budget=30000;
+  const rec=arr=>{
+    if(!arr.length)return [];
+    if(--budget<0)return null;
+    const k=arr.map(x=>x.v).sort((a,b)=>a-b).join(',');
+    if(dead.has(k))return null;
+    for(let i=0;i<arr.length;i++)if(G.has(arr[i].v)){const r=rec(arr.filter((_,t)=>t!==i));if(r)return [{type:'exit',item:arr[i]},...r]}
+    for(let i=0;i<arr.length;i++)for(let j=i+1;j<arr.length;j++){
+      const sum=arr[i].v+arr[j].v;if(sum>maxV||sum<minV)continue;
+      const m={v:sum,leaves:arr[i].leaves.concat(arr[j].leaves)};
+      const rest=arr.filter((_,t)=>t!==i&&t!==j);if(sum!==0)rest.push(m);
+      const r=rec(rest);if(r)return [{type:'merge',res:m},...r];
+    }
+    dead.add(k);return null;
+  };
+  return rec(items);
+}
 function layoutMath(s,f,nT){
   const {W,H}=s;
   const nG=Math.min(s.nG,s.vals.length);
@@ -554,6 +578,7 @@ function loadLevel(m){
 const tierOf=L=>Math.min(TIERS,Math.ceil(L/PER));
 let level=loadLevel(mode);
 let soundOn=store.get('lbo.sound',true);
+let helpersOn=store.get('lbo.helpers',true);
 
 /* ----- sound and voice ----- */
 let ac=null,master=null,voiceUnlocked=false,voice=null;
@@ -760,17 +785,18 @@ function refuse(el){wobble(el);bump();buzz(8)}
 function act(el){
   const p=el._p;if(!lv.pieces.includes(p))return;
   if(p.ice){crackIce(p,el);return}
-  if(p.kind!=='block'){refuse(el);return}
+  if(p.kind!=='block'){refuse(el);why(p,'Crates stay in the box. Slide them out of the way.');return}
   const g=gateOf(lv,p);
   if(!g){
-    if(!isMath()&&p.color<0&&lv.pots.length){nudge(el,dirToward(p,lv.pots[0]),cell*.1);bump();buzz(8)}else refuse(el);
+    if(!isMath()&&p.color<0&&lv.pots.length){nudge(el,dirToward(p,lv.pots[0]),cell*.1);bump();buzz(8);why(p,'Dip me in the paint pot first.')}
+    else{refuse(el);if(isMath())why(p,p.v<0?'Add me to a block to take away.':`There's no ${p.v} door. Add me to another block.`,p.v<0?'add me to a block':`no ${word(p.v)} door`)}
     return;
   }
-  if(g.locked){nudge(el,g.side);shakeLock(g);bump();buzz(8);return}
-  if(!fits(p,g)){refuse(el);return}
+  if(g.locked){nudge(el,g.side);shakeLock(g);bump();buzz(8);whyNoExit(p,g);return}
+  if(!fits(p,g)){refuse(el);whyNoExit(p,g);return}
   const b=straightBlocker(lv,p,g);
-  if(b){nudge(el,g.side);if(b!=='stone')setTimeout(()=>wobble(els.get(b)),90);bump();buzz(8);return}
-  if(!exitOK(p)){refuse(el);return}
+  if(b){nudge(el,g.side);if(b!=='stone')setTimeout(()=>wobble(els.get(b)),90);bump();buzz(8);why(p,'Something is in the way. Drag me around it.');return}
+  if(!exitOK(p)){refuse(el);why(p,savedFor(p),'not yet');return}
   if(lv.key&&!lv.keyTaken&&sweep(lv,p,g.side).includes(K(lv.key.x,lv.key.y)))takeKey();
   exitBlock(p,el,g);
 }
@@ -851,20 +877,76 @@ function eqWords(a,b,s){
   const pos=Math.max(a,b),neg=Math.min(a,b);
   return `${word(pos)} take away ${word(-neg)} is ${word(s)}`;
 }
+function bubbleAt(p,e,ms){
+  tray.appendChild(e);
+  const cx=P+(p.x+p.w/2)*cell,above=p.y>0;
+  const top=above?P+p.y*cell-cell*.08:P+(p.y+p.h)*cell+cell*.08;
+  const tl=parseFloat(tray.style.left)||0,sw=stage.clientWidth,w=e.offsetWidth;
+  const left=Math.max(-tl+8,Math.min(sw-tl-8-w,cx-w/2));
+  const base=above?'translateY(-100%)':'translateY(0)';
+  Object.assign(e.style,{left:left+'px',top:top+'px',transform:base});
+  const a=e.animate([
+    {opacity:0,transform:base+' translateY(8px) scale(.9)'},
+    {opacity:1,transform:base,offset:.1},{opacity:1,transform:base,offset:.85},
+    {opacity:0,transform:base+' translateY(-6px)'}
+  ],{duration:ms,easing:'ease-out',fill:'forwards'});
+  a.onfinish=()=>e.remove();
+  return e;
+}
 function showEq(p,text){
   const e=document.createElement('div');e.className='eq';e.textContent=text;
   const fs=Math.max(16,Math.round(cell*.3));
   e.style.fontSize=fs+'px';e.style.padding=`${fs*.3}px ${fs*.7}px`;
-  const cx=P+p.x*cell+cell/2,above=p.y>0;
-  const top=above?P+p.y*cell-cell*.08:P+(p.y+1)*cell+cell*.08;
-  const base=above?'translate(-50%,-100%)':'translate(-50%,0)';
-  Object.assign(e.style,{left:cx+'px',top:top+'px',transform:base});
-  tray.appendChild(e);
-  e.animate([
-    {opacity:0,transform:base+' translateY(8px) scale(.85)'},
-    {opacity:1,transform:base,offset:.12},{opacity:1,transform:base,offset:.82},
-    {opacity:0,transform:base+' translateY(-6px)'}
-  ],{duration:reduce?1400:2300,easing:'ease-out',fill:'forwards'}).onfinish=()=>e.remove();
+  bubbleAt(p,e,reduce?1400:2300);
+}
+/* a short reason whenever a move is refused, so a stop never looks like a bug */
+let whyEl=null;const whyAt={};
+function why(p,text,spoken){
+  if(!p||!helpersOn)return;
+  const now=Date.now();
+  if(whyAt[text]&&now-whyAt[text]<1800)return;
+  whyAt[text]=now;
+  if(whyEl&&whyEl.isConnected)whyEl.remove();
+  const e=document.createElement('div');e.className='eq why';e.textContent=text;
+  const fs=Math.max(14,Math.round(cell*.24));
+  e.style.fontSize=fs+'px';e.style.padding=`${fs*.45}px ${fs*.8}px`;
+  e.style.maxWidth=Math.min(250,stage.clientWidth-24)+'px';
+  whyEl=bubbleAt(p,e,reduce?2200:3200);
+  if(spoken&&isMath())say(spoken);
+}
+const COLOR_NAMES=['red','green','yellow','blue'];
+const sumText=vals=>vals.map((v,i)=>i===0?fmt(v):v<0?` − ${-v}`:` + ${v}`).join('');
+function savedFor(p){
+  const items=lv.pieces.filter(x=>x.kind==='block').map(x=>({v:x.v,leaves:[{id:x.id,v:x.v}]}));
+  const pl=planMoves(items,lv.G,lv.maxV,lv.minV);
+  if(pl){
+    const hit=pl.find(m=>(m.type==='exit'&&m.item.leaves.length>1&&m.item.leaves.some(l=>l.id===p.id))||(m.type==='merge'&&m.res.v===0&&m.res.leaves.some(l=>l.id===p.id)));
+    if(hit){
+      const g=hit.type==='exit'?hit.item:hit.res;
+      const vals=[p.v,...g.leaves.filter(l=>l.id!==p.id).map(l=>l.v)];
+      const ordered=[...vals.filter(v=>v>=0),...vals.filter(v=>v<0)];
+      return `Not yet! Save me for ${sumText(ordered)} = ${fmt(g.v)}`;
+    }
+  }
+  return 'Not yet! The other blocks need me.';
+}
+function whyNoMerge(p,other){
+  if(p.ice||other.ice)return why(p,'Tap the ice to crack it first.','tap the ice');
+  const s=p.v+other.v;
+  if(s>lv.maxV)return why(p,`Too big! ${sumText([p.v,other.v])} = ${s}. The biggest door is ${lv.maxV}.`,'too big');
+  if(s<lv.minV)return why(p,`Too small! ${sumText([p.v,other.v])} = ${fmt(s)}.`,'too small');
+  why(p,savedFor(p),'not yet');
+}
+function whyNoExit(p,g){
+  if(p.kind!=='block')return why(p,'Crates stay in the box. Slide them out of the way.');
+  if(!matches(lv,p,g)){
+    if(isMath())return p.v<0?why(p,'Add me to a block to take away.','add me to a block'):why(p,`This door needs ${g.value}. I'm ${p.v}.`,`this door needs ${word(g.value)}`);
+    if(p.color<0)return why(p,'Dip me in the paint pot first.');
+    return why(p,`This is the ${COLOR_NAMES[g.color]} door.`);
+  }
+  if(g.locked)return why(p,'Locked! Slide any block onto the key.','locked, find the key');
+  if(!fits(p,g))return why(p,isMath()?'Slide over in front of the door.':'Line me up with the door.');
+  if(!exitOK(p))return why(p,savedFor(p),'not yet');
 }
 /* adding: any two blocks may join if the total stays within the gates; a total of zero vanishes */
 function canMerge(a,b){
@@ -912,7 +994,7 @@ function deadFix(){
   const m=lv.pieces.filter(p=>p.kind==='block'&&p.tree&&p.tree.kids).sort((a,b)=>b.tree.t-a.tree.t)[0];
   if(!m)return;
   if(start&&start.p===m){deadSoon(700);return}
-  splitPiece(m);
+  if(splitPiece(m))why(m,"Oops! Then the other blocks can't make the doors. Try another way.",'oops, try another way');
   deadSoon(900);
 }
 function nearestFree(x,y){
@@ -1013,7 +1095,11 @@ function tryStep(s,axis,sign){
     const side=axis==='x'?(sign>0?'right':'left'):(sign>0?'bottom':'top');
     const g=lv.gates.find(x=>x.side===side&&matches(lv,p,x));
     if(g&&fits(p,g)&&!g.locked&&exitOK(p)){s.exited=true;exitBlock(p,s.el,g);return true}
-    if(s.bumped!==side){s.bumped=side;nudge(s.el,side,cell*.07);if(g&&g.locked)shakeLock(g);bump();buzz(6)}
+    if(s.bumped!==side){
+      s.bumped=side;nudge(s.el,side,cell*.07);if(g&&g.locked)shakeLock(g);bump();buzz(6);
+      const g0=lv.gates.find(x=>x.side===side);
+      if(g0)whyNoExit(p,g0);
+    }
     return false;
   }
   const occ=occMap(lv,p);
@@ -1021,7 +1107,10 @@ function tryStep(s,axis,sign){
     const k=axis+sign;
     const other=occ.get(K(nx,ny));
     if(other&&p.w===1&&p.h===1&&canMerge(p,other)){s.exited=true;merge(p,other,s.el);return true}
-    if(s.bumped!==k){s.bumped=k;bump();if(other)wobble(els.get(other))}
+    if(s.bumped!==k){
+      s.bumped=k;bump();if(other)wobble(els.get(other));
+      if(other&&isMath()&&p.kind==='block'&&other.kind==='block')whyNoMerge(p,other);
+    }
     return false;
   }
   p.x=nx;p.y=ny;s.bumped=null;place(s.el,p);tone(440,0,.05,'triangle',.12);
@@ -1033,7 +1122,7 @@ function follow(s,e){
   if(!s.moved&&Math.hypot(fx,fy)>.28){s.moved=true;clearTimeout(s.lp)}
   if(!s.moved)return;
   const p=s.p;
-  if(p.ice){if(!s.iceNudged){s.iceNudged=true;refuse(s.el)}return}
+  if(p.ice){if(!s.iceNudged){s.iceNudged=true;refuse(s.el);why(p,'Tap the ice to crack it.','tap the ice')}return}
   const tx=Math.max(-1,Math.min(lv.W-p.w+1,s.bx+Math.round(fx)));
   const ty=Math.max(-1,Math.min(lv.H-p.h+1,s.by+Math.round(fy)));
   for(let i=0;i<40&&!s.exited;i++){
@@ -1098,6 +1187,10 @@ function setSound(on){soundOn=on;store.set('lbo.sound',soundOn);drawSound();if(s
 sndBtn.addEventListener('click',()=>setSound(!soundOn));
 sndSw.addEventListener('click',()=>setSound(!soundOn));
 drawSound();
+const helpSw=document.getElementById('helpSw');
+function drawHelpers(){helpSw.setAttribute('aria-checked',String(helpersOn))}
+helpSw.addEventListener('click',()=>{helpersOn=!helpersOn;store.set('lbo.helpers',helpersOn);drawHelpers();if(!helpersOn&&whyEl&&whyEl.isConnected)whyEl.remove()});
+drawHelpers();
 const mathBtn=document.getElementById('mathBtn');
 function drawMode(){mathBtn.classList.toggle('on',mode==='math');mathBtn.setAttribute('aria-pressed',String(mode==='math'))}
 function switchMode(m,L){
